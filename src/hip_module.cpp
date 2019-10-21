@@ -32,6 +32,7 @@ THE SOFTWARE.
 #include <hsa/amd_hsa_kernel_code.h>
 #include <hsa/hsa.h>
 #include <hsa/hsa_ext_amd.h>
+#include <hsa/hsa_ven_amd_loader.h>
 
 #include <algorithm>
 #include <cassert>
@@ -109,6 +110,7 @@ struct ihipModuleSymbol_t {
     amd_kernel_code_t const* _header{};
     string _name;  // TODO - review for performance cost.  Name is just used for debug.
     vector<pair<size_t, size_t>> _kernarg_layout{};
+    hipModule_t _hmod;
 };
 
 template <>
@@ -255,6 +257,143 @@ hipError_t ihipModuleLaunchKernel(TlsData *tls, hipFunction_t f, uint32_t global
 
 
         hc::completion_future cf;
+
+#if COMPILE_HIP_DB
+        if (HIP_DB & (1 << (DB_AQL))) {
+        //if (getenv("AQL_CAPTURE") && (atoi(getenv("AQL_CAPTURE")) == 1)) {
+            // Need to enable 4G address decoder in BIOS before doing capture
+            ///////////////////////// AQL capture start /////////////////////
+            static uint32_t aql_pkt_obj_idx = 0;
+
+            tprintf(DB_AQL, "$compute_queue index=0x0\n");
+            // 1. Dump AQL packet
+            tprintf(DB_AQL, "@aql_pkt pkt_id=0x2 pkt_num=0x%x addr=0x%lx\n", aql_pkt_obj_idx, (uint64_t)&aql);
+            aql.kernarg_address = kernargs.data();
+            for (int i = 0; i < sizeof(hsa_kernel_dispatch_packet_t) / sizeof(uint32_t); i++) {
+                tprintf(DB_AQL, "0x%08x\n", ((uint32_t*)&aql)[i]);
+            }
+            aql.kernarg_address = 0;
+            // 2. Dump kernel object
+            uint64_t kernel_obj_vaddr = (uint64_t)aql.kernel_object;
+
+            // Get kernel args and kernel arg count
+            auto kernelargs_md = (f->_hmod) ? f->_hmod->kernargs_md : hip_impl::get_program_state().get_kernargs_md();
+            auto args = kernelargs_md.find(f->_name);
+            if (args == kernelargs_md.end()) { hip_throw(std::runtime_error{"Missing metadata for __global__ function: " + args->first}); }
+
+            uint32_t kernel_arg_count = args->second.size();
+            const void* kernel_obj_ptr = 0;
+            hsa_ven_amd_loader_1_01_pfn_t amd_loader_ext_table{};
+            hsa_status_t status = hsa_system_get_major_extension_table(HSA_EXTENSION_AMD_LOADER, 1, sizeof(amd_loader_ext_table), &amd_loader_ext_table);
+            assert(status == HSA_STATUS_SUCCESS);
+            assert(nullptr != amd_loader_ext_table.hsa_ven_amd_loader_query_host_address);
+            amd_loader_ext_table.hsa_ven_amd_loader_query_host_address((const void*)kernel_obj_vaddr, &kernel_obj_ptr);
+            uint32_t* kernel_obj = (uint32_t*)kernel_obj_ptr;
+            hsa_executable_t executable = {};
+            if (f->_hmod) { executable = f->_hmod->executable; }
+            uint32_t kernel_size = hip_impl::get_program_state().get_kernel_size(executable, gpuAgent, f->_name.c_str());
+            tprintf(DB_AQL, "#kernel_obj name: %s\n", f->_name.c_str());
+            tprintf(DB_AQL, "@kernel_obj pkt_num=0x%x args=0x%x bytes=0x%x addr=0x%lx\n",
+                    aql_pkt_obj_idx,
+                    kernel_arg_count,
+                    kernel_size,
+                    kernel_obj_vaddr);
+            for (int i = 0; i < kernel_size / sizeof(uint32_t); i++) {
+                tprintf(DB_AQL, "0x%08x\n", ((uint32_t*)kernel_obj)[i]);
+            }
+            // 3. Dump kernel arg pool
+            uint32_t kernel_args_size = kernargs.size();
+            uint64_t kernel_args_addr = (uint64_t)kernargs.data();
+            tprintf(DB_AQL, "@kernel_arg_pool pkt_num=0x%x args_num=0x%x addr=0x%lx bytes=0x%x in\n",
+                    aql_pkt_obj_idx,
+                    kernel_arg_count,
+                    kernel_args_addr,
+                    kernel_args_size);
+            for (int i = 0; i < kernel_args_size / sizeof(uint32_t); i++) {
+                tprintf(DB_AQL, "0x%08x\n", ((uint32_t*)kernel_args_addr)[i]);
+            }
+
+            // 4. Dump kernel args
+            for (auto arg : args->second) {
+                tprintf(DB_AQL, "#kernel_arg %lu: %s, size: %lu, offset: %lu, align: %lu, value_kind: %lu\n", arg.arg_idx, arg.arg_name.c_str(),
+                    arg.arg_size, arg.arg_offset, arg.arg_align, arg.arg_value_kind);
+
+                switch (arg.arg_value_kind) {
+                case ARG_VALUE_KIND_GLOBAL_BUFFER:
+                case ARG_VALUE_KIND_SAMPLER:
+                case ARG_VALUE_KIND_IMAGE: {
+                    uint64_t kernel_arg_vaddr = ((uint64_t*)(kernel_args_addr + arg.arg_offset))[0];
+                    hc::accelerator acc;
+#if (__hcc_workweek__ >= 17332)
+                    hc::AmPointerInfo amPointerInfo(NULL, NULL, NULL, 0, acc, 0, 0);
+#else
+                    hc::AmPointerInfo amPointerInfo(NULL, NULL, 0, acc, 0, 0);
+#endif
+                    am_status_t status = hc::am_memtracker_getinfo(&amPointerInfo, (void*)kernel_arg_vaddr);
+                    size_t arg_size = 0;
+                    if (status == AM_SUCCESS) {
+                        arg_size = amPointerInfo._sizeBytes;
+                    }
+                    if (arg.arg_value_kind == ARG_VALUE_KIND_IMAGE) {
+                        fprintf(stderr, "IMAGE type not supported in AQL CAPTURE!!!\n");
+                        // Refer to ISA spec "8.4.2. Image Resource"
+                        arg_size = 32; // 256 bits
+                    } else if (arg.arg_value_kind == ARG_VALUE_KIND_SAMPLER) {
+                        // Refer to ISA spec "8.4.3. Image Sampler"
+                        arg_size = 16; // 128 bits
+                    }
+
+                    //FIXME: Currently this solution is not able to distinguish the arg is in or out.
+                    tprintf(DB_AQL, "@kernel_arg pkt_num=0x%x arg_idx=0x%lx arg_type=0x%lx offset=0x%lx addr=0x%lx bytes=0x%lx in\n",
+                            aql_pkt_obj_idx,
+                            arg.arg_idx,
+                            arg.arg_value_kind,
+                            arg.arg_offset,
+                            kernel_arg_vaddr,
+                            arg_size);
+                    for (size_t k = 0; k < arg_size / sizeof(uint32_t); k++) {
+                        tprintf(DB_AQL, "0x%08x\n", ((uint32_t*)kernel_arg_vaddr)[k]);
+                    }
+                    if (arg.arg_value_kind == ARG_VALUE_KIND_IMAGE) {
+                        int arg_ib_idx = 0;
+                        uint64_t image_base_addr = (((uint64_t*)kernel_arg_vaddr)[0] & 0xffffffffffUL) << 8;
+                        status = hc::am_memtracker_getinfo(&amPointerInfo, (void*)image_base_addr);
+                        arg_size = 0;
+                        if (status == AM_SUCCESS) {
+                            arg_size = amPointerInfo._sizeBytes;
+                        }
+                        tprintf(DB_AQL, "@kernel_arg_ib pkt_num=0x%x arg_idx=0x%lx arg_type=0x%x offset=0x%lx addr=0x%lx bytes=0x%lx in\n",
+                                aql_pkt_obj_idx,
+                                arg.arg_idx,
+                                ARG_VALUE_KIND_GLOBAL_BUFFER,
+                                arg.arg_offset,
+                                image_base_addr,
+                                arg_size);
+                        for (size_t k = 0; k < arg_size / sizeof(uint32_t); k++) {
+                            tprintf(DB_AQL, "0x%08x\n", ((uint32_t*)image_base_addr)[k]);
+                        }
+                    }
+                    break;
+                }
+                case ARG_VALUE_KIND_BY_VALUE: {
+                    tprintf(DB_AQL, "@kernel_arg pkt_num=0x%x arg_idx=0x%lx arg_type=0x%lx offset=0x%lx addr=0x%x bytes=0x%lx in\n",
+                            aql_pkt_obj_idx,
+                            arg.arg_idx,
+                            arg.arg_value_kind,
+                            arg.arg_offset,
+                            0,
+                            arg.arg_size);
+                    break;
+                }
+                default: {
+                    fprintf(stderr, "Arg type for arg %lu NOT supported!\n", arg.arg_idx);
+                }
+                }
+            }
+            aql_pkt_obj_idx++;
+            ///////////////////////// AQL capture end /////////////////////
+        }
+#endif
 
         lp.av->dispatch_hsa_kernel(&aql, kernargs.data(), kernargs.size(),
                                    (startEvent || stopEvent) ? &cf : nullptr
@@ -806,8 +945,8 @@ hipError_t ihipModuleGetFunction(TlsData *tls, hipFunction_t* func, hipModule_t 
 
     auto kernel = find_kernel_by_name(hmod->executable, name, agent);
 
+    std::string name_str(name);
     if (kernel.handle == 0u) {
-        std::string name_str(name);
         name_str.append(".kd");
         kernel = find_kernel_by_name(hmod->executable, name_str.c_str(), agent);
     }
@@ -817,7 +956,7 @@ hipError_t ihipModuleGetFunction(TlsData *tls, hipFunction_t* func, hipModule_t 
     // TODO: refactor the whole ihipThisThat, which is a mess and yields the
     //       below, due to hipFunction_t being a pointer to ihipModuleSymbol_t.
     func[0][0] = *static_cast<hipFunction_t>(
-        Kernel_descriptor{kernel_object(kernel), name, hmod->kernargs[name]});
+        Kernel_descriptor{kernel_object(kernel), name_str.c_str(), hmod->kernargs[name_str.c_str()], hmod});
 
     return hipSuccess;
 }
@@ -972,7 +1111,7 @@ hipError_t ihipModuleLoadData(TlsData *tls, hipModule_t* module, const void* ima
                                             this_agent());
 
     std::vector<char> blob(content.cbegin(), content.cend());
-    program_state_impl::read_kernarg_metadata(blob, (*module)->kernargs);
+    program_state_impl::read_kernarg_metadata(blob, (*module)->kernargs, (*module)->kernargs_md);
 
     // compute the hash of the code object
     (*module)->hash = checksum(content.length(), content.data());

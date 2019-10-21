@@ -92,16 +92,19 @@ class Kernel_descriptor {
     amd_kernel_code_t const* kernel_header_{nullptr};
     std::string name_{};
     std::vector<std::pair<std::size_t, std::size_t>> kernarg_layout_{};
+    void* hmod_{};
 public:
     Kernel_descriptor() = default;
     Kernel_descriptor(
         std::uint64_t kernel_object,
         const std::string& name,
-        std::vector<std::pair<std::size_t, std::size_t>> kernarg_layout = {})
+        std::vector<std::pair<std::size_t, std::size_t>> kernarg_layout = {},
+        void* hmod = {})
         :
         kernel_object_{kernel_object},
         name_{name},
-        kernarg_layout_{std::move(kernarg_layout)}
+        kernarg_layout_{std::move(kernarg_layout)},
+        hmod_{hmod}
     {
         bool supported{false};
         std::uint16_t min_v{UINT16_MAX};
@@ -175,6 +178,11 @@ public:
         std::once_flag,
         std::unordered_map<
             std::string, std::vector<std::pair<std::size_t, std::size_t>>>> kernargs;
+
+    std::pair<
+        std::once_flag,
+        std::unordered_map<
+            std::string, std::vector<kernelarg_t>>> kernargs_md;
 
     std::pair<
         std::once_flag,
@@ -601,12 +609,14 @@ public:
     void parse_args(
             const amd_comgr_metadata_node_t& args_md,
             bool is_code_object_v3,
-            std::vector<std::pair<std::size_t, std::size_t>>& size_align) {
+            std::vector<std::pair<std::size_t, std::size_t>>& size_align,
+            std::vector<kernelarg_t>& kernel_args) {
         size_t arg_count = 0;
         if (amd_comgr_get_metadata_list_size(args_md, &arg_count)
             != AMD_COMGR_STATUS_SUCCESS)
             return;
 
+        size_t tmp_arg_offset = 0;
         for (size_t i = 0; i < arg_count; ++i) {
             amd_comgr_metadata_node_t arg_md;
 
@@ -627,7 +637,8 @@ public:
                 != AMD_COMGR_STATUS_SUCCESS)
                 return;
 
-            size_t arg_align;
+            size_t arg_align = 1;
+            size_t arg_offset = 0;
 
             if (is_code_object_v3) {
                 amd_comgr_metadata_node_t arg_offset_md;
@@ -635,16 +646,16 @@ public:
                     != AMD_COMGR_STATUS_SUCCESS)
                     return;
 
-                size_t arg_offset
+                arg_offset
                     = std::stoul(metadata_to_string(arg_offset_md));
 
                 if (amd_comgr_destroy_metadata(arg_offset_md)
                     != AMD_COMGR_STATUS_SUCCESS)
                     return;
 
-                arg_align = 1;
-                while (arg_offset && (arg_offset & 1) == 0) {
-                    arg_offset >>= 1;
+                tmp_arg_offset = arg_offset;
+                while (tmp_arg_offset && (tmp_arg_offset & 1) == 0) {
+                    tmp_arg_offset >>= 1;
                     arg_align <<= 1;
                 }
             } else {
@@ -655,12 +666,84 @@ public:
 
                 arg_align = std::stoul(metadata_to_string(arg_align_md));
 
+                arg_offset = tmp_arg_offset;
+                tmp_arg_offset += ((arg_size + arg_align - 1) / arg_align) * arg_align;
+
                 if (amd_comgr_destroy_metadata(arg_align_md)
                     != AMD_COMGR_STATUS_SUCCESS)
                     return;
             }
 
             size_align.emplace_back(arg_size, arg_align);
+
+            amd_comgr_metadata_node_t arg_value_kind_md;
+            if (amd_comgr_metadata_lookup(arg_md,
+                                          is_code_object_v3 ? ".value_kind" : "ValueKind",
+                                          &arg_value_kind_md)
+                != AMD_COMGR_STATUS_SUCCESS)
+                return;
+
+            std::string arg_value_kind = metadata_to_string(arg_value_kind_md);
+
+            if (amd_comgr_destroy_metadata(arg_value_kind_md)
+                != AMD_COMGR_STATUS_SUCCESS)
+                return;
+
+            //amd_comgr_metadata_node_t arg_value_type_md;
+            //if (amd_comgr_metadata_lookup(arg_md,
+            //                              is_code_object_v3 ? ".value_type" : "ValueType",
+            //                              &arg_value_type_md)
+            //    != AMD_COMGR_STATUS_SUCCESS)
+            //    return;
+
+            //std::string arg_value_type = metadata_to_string(arg_value_type_md);
+
+            //if (amd_comgr_destroy_metadata(arg_value_type_md)
+            //    != AMD_COMGR_STATUS_SUCCESS)
+            //    return;
+
+            amd_comgr_metadata_node_t arg_name_md;
+            if (amd_comgr_metadata_lookup(arg_md,
+                                          is_code_object_v3 ? ".name" : "Name",
+                                          &arg_name_md)
+                != AMD_COMGR_STATUS_SUCCESS)
+                return;
+
+            std::string arg_name = metadata_to_string(arg_name_md);
+
+            if (amd_comgr_destroy_metadata(arg_name_md)
+                != AMD_COMGR_STATUS_SUCCESS)
+                return;
+
+            size_t arg_value_kind_ = ARG_VALUE_KIND_NOT_SUPPORTED;
+            if (!strcmp(arg_value_kind.c_str(), "ByValue") || !strcmp(arg_value_kind.c_str(), "by_value")) {
+                arg_value_kind_ = ARG_VALUE_KIND_BY_VALUE;
+            } else if (!strcmp(arg_value_kind.c_str(), "GlobalBuffer") || !strcmp(arg_value_kind.c_str(), "global_buffer")) {
+                arg_value_kind_ = ARG_VALUE_KIND_GLOBAL_BUFFER;
+            } else if (!strcmp(arg_value_kind.c_str(), "Image") || !strcmp(arg_value_kind.c_str(), "image")) {
+                arg_value_kind_ = ARG_VALUE_KIND_IMAGE;
+            } else if (!strcmp(arg_value_kind.c_str(), "Sampler") || !strcmp(arg_value_kind.c_str(), "sampler")) {
+                arg_value_kind_ = ARG_VALUE_KIND_SAMPLER;
+            }
+
+            //size_t arg_value_type_byte_size = 0;
+            //if (!strcmp(arg_value_type.c_str(), "F64") || !strcmp(arg_value_type.c_str(), "U64") || !strcmp(arg_value_type.c_str(), "I64")) {
+            //    arg_value_type_byte_size = 8;
+            //} else if (!strcmp(arg_value_type.c_str(), "F32") || !strcmp(arg_value_type.c_str(), "U32") || !strcmp(arg_value_type.c_str(), "I32")) {
+            //    arg_value_type_byte_size = 4;
+            //} else if (!strcmp(arg_value_type.c_str(), "F16") || !strcmp(arg_value_type.c_str(), "U16") || !strcmp(arg_value_type.c_str(), "I16")) {
+            //    arg_value_type_byte_size = 2;
+            //} else if (!strcmp(arg_value_type.c_str(), "U8") || !strcmp(arg_value_type.c_str(), "I8")) {
+            //    arg_value_type_byte_size = 1;
+            //} else if (!strcmp(arg_value_type.c_str(), "Struct")) {
+            //    fprintf(stderr, "Struct arg value not testd yet! Kernel Name: %s\n", arg_name.c_str());
+            //}
+
+            //kernelarg_t arg = {i, arg_size, arg_offset, arg_align, arg_value_kind_, arg_value_type_byte_size, arg_value_type, arg_name};
+            kernelarg_t arg = {i, arg_size, arg_offset, arg_align, arg_value_kind_, arg_name};
+            //fprintf(stderr, "#############kernel arg %lu: %s, %s, size: %lu, offset: %lu, align: %lu, value_kind: %lu\n", i, arg.arg_name.c_str(),
+            //        arg_value_kind.c_str(), arg.arg_size, arg.arg_offset, arg.arg_align, arg.arg_value_kind);
+            kernel_args.emplace_back(arg);
 
             if (amd_comgr_destroy_metadata(arg_md)
                 != AMD_COMGR_STATUS_SUCCESS)
@@ -673,7 +756,10 @@ public:
             const std::vector<char>& blob,
             std::unordered_map<
             std::string,
-            std::vector<std::pair<std::size_t, std::size_t>>>& kernargs) {
+            std::vector<std::pair<std::size_t, std::size_t>>>& kernargs,
+            std::unordered_map<
+            std::string,
+            std::vector<kernelarg_t>>& kernargs_md) {
         amd_comgr_data_t dataIn;
         amd_comgr_status_t status;
 
@@ -741,7 +827,8 @@ public:
             auto foundKernel = kernargs.find(kernel_name_str);
             // parse arguments for a given kernel only once
             if (foundKernel == kernargs.end()) {
-                parse_args(args_md, is_code_object_v3, kernargs[kernel_name_str]);
+                //fprintf(stderr, "name of kernel [%lu]: %s\n", i, kernel_name_str.c_str());
+                parse_args(args_md, is_code_object_v3, kernargs[kernel_name_str], kernargs_md[kernel_name_str]);
             }
 
             if (amd_comgr_destroy_metadata(args_md) != AMD_COMGR_STATUS_SUCCESS
@@ -761,16 +848,34 @@ public:
         std::vector<std::pair<std::size_t, std::size_t>>>& get_kernargs() {
 
         std::call_once(kernargs.first, [this]() {
+            // Only select the first agent.
+            hsa_isa_t agent_isa = isa(all_hsa_agents()[0]);
             for (auto&& name_and_isa_blobs : get_code_object_blobs()) {
+                //fprintf(stderr, "###name of blobs: %s\n", name_and_isa_blobs.first.c_str());
                 for (auto&& isa_blobs : name_and_isa_blobs.second) {
-                    for (auto&& blob : isa_blobs.second) {
-                        read_kernarg_metadata(blob, kernargs.second);
+                    //char isa_name[64]{};
+                    //hsa_isa_get_info_alt(isa_blobs.first, HSA_ISA_INFO_NAME, isa_name);
+                    //fprintf(stderr, "isa of blobs: %s\n", isa_name);
+                    //hsa_isa_get_info_alt(agent_isa, HSA_ISA_INFO_NAME, isa_name);
+                    //fprintf(stderr, "isa of agent: %s\n", isa_name);
+                    if (agent_isa == isa_blobs.first) {
+                        for (auto&& blob : isa_blobs.second) {
+                            read_kernarg_metadata(blob, kernargs.second, kernargs_md.second);
+                        }
                     }
                 }
             }
         });
 
         return kernargs.second;
+    }
+
+    const std::unordered_map<std::string, std::vector<kernelarg_t>>& get_kernargs_md() {
+        std::call_once(kernargs_md.first, [this]() {
+            get_kernargs();
+        });
+
+        return kernargs_md.second;
     }
 
     std::string name(std::uintptr_t function_address)

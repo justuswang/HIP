@@ -34,6 +34,7 @@ THE SOFTWARE.
 #include "hip_util.h"
 #include "env.h"
 
+#include "../include/hip/hcc_detail/program_state.hpp"
 
 #if (__hcc_workweek__ < 16354)
 #error("This version of HIP requires a newer version of HCC.");
@@ -245,7 +246,8 @@ extern const char* API_COLOR_END;
 #define DB_COPY 3 /* 0x08 - trace memory copy and peer commands. . */
 #define DB_WARN 4 /* 0x10 - warn about sub-optimal or shady behavior */
 #define DB_FB 5   /* 0x20 - trace loading fat binary */
-#define DB_MAX_FLAG 6
+#define DB_AQL 6  /* 0x40 - dump aql */
+#define DB_MAX_FLAG 7
 // When adding a new debug flag, also add to the char name table below.
 //
 //
@@ -259,7 +261,7 @@ struct DbName {
 static const DbName dbName[] = {
     {KGRN, "api"},  // not used,
     {KYEL, "sync"}, {KCYN, "mem"}, {KMAG, "copy"}, {KRED, "warn"},
-    {KBLU, "fatbin"},
+    {KBLU, "fatbin"}, {KWHT, "aql"},
 };
 
 
@@ -395,6 +397,8 @@ struct ihipModule_t {
     std::string hash;
     std::unordered_map<
         std::string, std::vector<std::pair<std::size_t, std::size_t>>> kernargs;
+    std::unordered_map<
+        std::string, std::vector<kernelarg_t>> kernargs_md;
 
     ~ihipModule_t() {
         if (executable.handle) hsa_executable_destroy(executable);

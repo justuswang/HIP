@@ -30,13 +30,35 @@ THE SOFTWARE.
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
+#include <unordered_map>
+#include <vector>
 
 #include <hip/hip_common.h>
 
 struct ihipModuleSymbol_t;
 using hipFunction_t = ihipModuleSymbol_t*;
 
+typedef struct _kernelarg {
+    size_t arg_idx;
+    size_t arg_size;
+    size_t arg_offset;
+    size_t arg_align;
+    size_t arg_value_kind;
+    //size_t arg_value_type_byte_size;
+    //std::string arg_value_type;
+    std::string arg_name;
+} kernelarg_t;
+
 namespace hip_impl {
+
+enum {
+    ARG_VALUE_KIND_NOT_SUPPORTED = 0,
+    ARG_VALUE_KIND_GLOBAL_BUFFER,
+    ARG_VALUE_KIND_BY_VALUE,
+    ARG_VALUE_KIND_RESERVED,
+    ARG_VALUE_KIND_IMAGE,
+    ARG_VALUE_KIND_SAMPLER,
+};
 
 // This section contains internal APIs that
 // needs to be exported
@@ -76,6 +98,9 @@ public:
 
     void* global_addr_by_name(const char* name);
 
+    uint32_t get_kernel_size(hsa_executable_t executable, hsa_agent_t agent, const char* name);
+
+    const std::unordered_map<std::string, std::vector<kernelarg_t>>& get_kernargs_md();
 private:
     friend class agent_globals_impl;
     program_state_impl* impl;
