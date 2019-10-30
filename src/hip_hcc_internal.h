@@ -163,6 +163,7 @@ class ihipCtx_t;
 struct ihipEventData_t;
 
 // Color defs for debug messages:
+#define KNON ""
 #define KNRM "\x1B[0m"
 #define KRED "\x1B[31m"
 #define KGRN "\x1B[32m"
@@ -261,7 +262,7 @@ struct DbName {
 static const DbName dbName[] = {
     {KGRN, "api"},  // not used,
     {KYEL, "sync"}, {KCYN, "mem"}, {KMAG, "copy"}, {KRED, "warn"},
-    {KBLU, "fatbin"}, {KWHT, "aql"},
+    {KBLU, "fatbin"}, {KNON, "aql"},
 };
 
 
@@ -272,8 +273,13 @@ static const DbName dbName[] = {
             GET_TLS();                                                                                                \
             char msgStr[1000];                                                                                        \
             snprintf(msgStr, sizeof(msgStr), __VA_ARGS__);                                                            \
-            fprintf(stderr, "  %ship-%s pid:%d tid:%d:%s%s", dbName[trace_level]._color,                              \
-                    dbName[trace_level]._shortName, tls->tidInfo.pid(), tls->tidInfo.tid(), msgStr, KNRM);            \
+            if (strcmp(dbName[trace_level]._color, KNON)) {                                                           \
+                fprintf(stderr, "  %ship-%s pid:%d tid:%d:%s%s", dbName[trace_level]._color,                          \
+                        dbName[trace_level]._shortName, tls->tidInfo.pid(), tls->tidInfo.tid(), msgStr, KNRM);        \
+            } else {                                                                                                  \
+                fprintf(stderr, "  hip-%s pid:%d tid:%d:%s",                                                          \
+                        dbName[trace_level]._shortName, tls->tidInfo.pid(), tls->tidInfo.tid(), msgStr);              \
+            }                                                                                                         \
         }                                                                                                             \
     }
 #else
