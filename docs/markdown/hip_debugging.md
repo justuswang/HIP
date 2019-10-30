@@ -18,6 +18,7 @@ different color-coded levels of debug information:
   - sync : Print multi-thread and other synchronization debug information.
   - copy : Print which engine is doing the copy, which copy flavor is selected, information on source and destination memory.
   - mem  : Print information about memory allocation - which pointers are allocated, where they are allocated, peer mappings, and more.
+  - aql  : Print AQL packet and related buffer data.
 
 HIP_DB format is flags separated by '+' sign, or a hex code for the bitmask.  Generally the + format is preferred.  
 For example:

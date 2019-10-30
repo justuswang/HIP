@@ -71,6 +71,38 @@ namespace hip_impl {
         return impl->load_executable(data, data_size, executable, agent);
     }
 
+    uint32_t program_state::get_kernel_size(hsa_executable_t hsa_executable, hsa_agent_t agent, const char* name) {
+        uint32_t kernelSize = 0;
+        hsa_executable_symbol_t kernelSymbol = {};
+        if (hsa_executable.handle) {
+            hsa_executable_get_symbol_by_name(hsa_executable, name, &agent, &kernelSymbol);
+        } else {
+            for (auto&& executable : impl->get_executables(agent)) {
+                if (HSA_STATUS_SUCCESS == hsa_executable_get_symbol_by_name(executable, name, &agent, &kernelSymbol)) {
+                    break;
+                }
+            }
+        }
+        if (HSA_STATUS_SUCCESS != hsa_executable_symbol_get_info(kernelSymbol, (hsa_executable_symbol_info_t)100, //HSA_EXT_EXECUTABLE_SYMBOL_INFO_KERNEL_OBJECT_SIZE,
+                                                                &kernelSize)) {
+            kernelSize = 0;
+        }
+        if ((std::string(name).find(".kd") != std::string::npos) && kernelSize) {
+            uint32_t varSize = 0;
+            hsa_executable_get_symbol_by_name(hsa_executable, std::string("__hip_device_heap").c_str(), &agent, &kernelSymbol);
+            hsa_executable_symbol_get_info(kernelSymbol, (hsa_executable_symbol_info_t)HSA_CODE_SYMBOL_INFO_VARIABLE_SIZE, &varSize);
+            kernelSize += varSize;
+            hsa_executable_get_symbol_by_name(hsa_executable, std::string("__hip_device_page_flag").c_str(), &agent, &kernelSymbol);
+            hsa_executable_symbol_get_info(kernelSymbol, (hsa_executable_symbol_info_t)HSA_CODE_SYMBOL_INFO_VARIABLE_SIZE, &varSize);
+            kernelSize += varSize;
+        }
+        return kernelSize;
+    }
+
+    const std::unordered_map<std::string, std::vector<kernelarg_t>>& program_state::get_kernargs_md() {
+        return impl->get_kernargs_md();
+    }
+
     hipFunction_t program_state::kernel_descriptor(std::uintptr_t function_address,
         hsa_agent_t agent) {
         auto& kd = impl->kernel_descriptor(function_address, agent);

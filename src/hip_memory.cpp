@@ -319,6 +319,7 @@ hipError_t ihipHostMalloc(TlsData *tls, void** ptr, size_t sizeBytes, unsigned i
         if (flags == hipHostMallocDefault) {
             // HCC/ROCM provide a modern system with unified memory and should set both of these
             // flags by default:
+            //flags = hipHostMallocMapped | hipHostMallocPortable; ???
             trueFlags = hipHostMallocMapped | hipHostMallocPortable;
         }
 
@@ -343,9 +344,9 @@ hipError_t ihipHostMalloc(TlsData *tls, void** ptr, size_t sizeBytes, unsigned i
             unsigned amFlags = 0;
 #endif
             if (flags & hipHostMallocCoherent) {
-                amFlags |= amHostCoherent;
+                amFlags |= amHostCoherent; // un-cached
             } else if (flags & hipHostMallocNonCoherent) {
-                amFlags |= amHostNonCoherent;
+                amFlags |= amHostNonCoherent; // cached
             } else {
                 // depends on env variables:
                 amFlags |= HIP_HOST_COHERENT ? amHostCoherent : amHostNonCoherent;

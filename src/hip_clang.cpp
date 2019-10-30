@@ -28,6 +28,7 @@ THE SOFTWARE.
 #include "hip_hcc_internal.h"
 #include "hip_fatbin.h"
 #include "trace_helper.h"
+#include "program_state.inl"
 
 #ifdef __GNUC__
 #pragma GCC visibility push (default)
@@ -94,6 +95,9 @@ __hipRegisterFatBinary(const void* data)
                                                                          agent);
 
       if (module->executable.handle) {
+        std::vector<char> blob(image.cbegin(), image.cend());
+        hip_impl::program_state_impl::read_kernarg_metadata(blob, module->kernargs, module->kernargs_md);
+
         modules->at(deviceId) = module;
         tprintf(DB_FB, "Loaded code object for %s\n", name);
       } else {

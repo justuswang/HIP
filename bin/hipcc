@@ -831,6 +831,10 @@ if($HIP_PLATFORM eq "hcc" or $HIP_PLATFORM eq "clang"){
     }
 }
 
+if ($HIP_PLATFORM eq 'clang') {
+    $HIPCXXFLAGS .= " -mno-code-object-v3"
+}
+
 if ($hasC and $HIP_PLATFORM eq 'nvcc') {
     $HIPCXXFLAGS .= " -x cu";
 }
